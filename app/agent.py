@@ -14,13 +14,21 @@
 # limitations under the License.
 
 import datetime
+import json
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from a2ui.basic_catalog.provider import BasicCatalog
+from a2ui.schema.manager import A2uiSchemaManager
 from google.adk.agents import Agent
+from google.adk.agents.callback_context import CallbackContext
 from google.adk.apps import App
+from google.adk.code_executors import AgentEngineSandboxCodeExecutor
 from google.adk.models import Gemini
+from google.adk.tools.preload_memory_tool import PreloadMemoryTool
 from google.genai import types
 
+from app.a2ui_utils import a2ui_callback
 from app.tools import (
     add_field,
     fetch_live_weather_forecast,
@@ -30,7 +38,64 @@ from app.tools import (
     log_spray_event,
 )
 
-MODEL = "gemini-3.8-flash"
+MODEL = "gemini-2.5-flash"
+
+# Build A2UI system prompt using version 0.8 and Basic Catalog
+schema_manager = A2uiSchemaManager(
+    version="0.8",
+    catalogs=[BasicCatalog.get_config("0.8")],
+)
+
+instruction = schema_manager.generate_system_prompt(
+    role_description=(
+        "You are AgroSprayer, a precision agriculture assistant. You help farmers check crop field "
+        "records in Firestore, fetch live weather, Delta-T, and soil condition forecasts from Open-Meteo, "
+        "evaluate weather conditions for optimal spraying windows, log spraying events, generate visual spray advisory diagrams, "
+        "execute Python code in a sandboxed environment, and recall user preferences and past spray advisories across sessions using Memory Bank."
+    ),
+    workflow_description="Analyze the request and return structured UI when appropriate.",
+    ui_description=(
+        "Keep every surface tiny and flat: ONE Card > ONE Column > a few Text rows. "
+        "Never nest a Card inside a Card. "
+        "Use ONLY these components: Card, Column, Row, Text, and Image. Do not use "
+        "Table or Heading (unsupported), or Buttons, actions, or forms (they do "
+        "nothing in adk web). "
+        "You may include one Image component, but only when you have a public https "
+        "URL for the image (for example the URL an image tool returns after uploading "
+        "to a public bucket). Set the Image url to that exact https link, for example "
+        '{"Image": {"url": {"literalString": "https://..."}}}. Never point an '
+        "Image at a bare filename, an artifact name, or a non-http(s) path. If you do "
+        "not have a public URL, add a short Text line noting the image instead. "
+        "No markdown in text; use the usageHint property ('h1', 'h2', 'body') for "
+        "headings and emphasis. "
+        "Output ONLY the raw A2UI JSON array — no prose, and never wrap it in "
+        "<a2a_datapart_json> tags or 'kind'/'data'/'metadata' objects."
+    ),
+    include_schema=True,
+    include_examples=True,
+)
+
+# Read deployment_metadata.json to retrieve Agent Engine resource name if available
+metadata_path = Path(__file__).parent.parent / "deployment_metadata.json"
+agent_engine_resource_name = None
+
+if metadata_path.exists():
+    try:
+        with open(metadata_path, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+            agent_engine_resource_name = metadata.get("remote_agent_runtime_id")
+    except Exception as e:
+        print(f"Warning: Failed to read deployment_metadata.json: {e}")
+
+code_executor = AgentEngineSandboxCodeExecutor(
+    agent_engine_resource_name=agent_engine_resource_name
+)
+
+
+async def generate_memories_callback(callback_context: CallbackContext):
+    """WRITE: After each turn, send the session to Memory Bank for extraction."""
+    await callback_context.add_session_to_memory()
+    return None
 
 
 def get_current_time(query: str) -> str:
@@ -62,12 +127,9 @@ root_agent = Agent(
         model=MODEL,
         retry_options=types.HttpRetryOptions(attempts=3),
     ),
-    instruction=(
-        "You are AgroSprayer, a precision agriculture assistant. You help farmers check crop field "
-        "records in Firestore, fetch live weather, Delta-T, and soil condition forecasts from Open-Meteo, "
-        "evaluate weather conditions for optimal spraying windows, log spraying events, generate visual spray advisory diagrams, and manage agricultural field data."
-    ),
+    instruction=instruction,
     tools=[
+        PreloadMemoryTool(),
         fetch_live_weather_forecast,
         fetch_soil_conditions,
         generate_field_advisory_image,
@@ -76,9 +138,13 @@ root_agent = Agent(
         add_field,
         log_spray_event,
     ],
+    after_agent_callback=generate_memories_callback,
+    after_model_callback=a2ui_callback,
+    code_executor=code_executor,
 )
 
 app = App(
     root_agent=root_agent,
     name="app",
 )
+

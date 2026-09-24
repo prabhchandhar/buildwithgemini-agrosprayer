@@ -44,15 +44,30 @@ def generate_field_advisory_image(
             contents=f"High quality agricultural visual diagram: {prompt}",
         )
 
-        if not response.candidates or not response.candidates[0].content.parts:
+        if not response.candidates or not response.candidates[0].content or not response.candidates[0].content.parts:
             return "Error: No image content returned from model generation."
 
-        part = response.candidates[0].content.parts[0]
-        if not part.inline_data or not part.inline_data.data:
-            return "Error: Model response did not contain inline image bytes."
+        candidate = response.candidates[0]
+        image_bytes = None
+        mime_type = "image/jpeg"
+        text_parts = []
 
-        image_bytes = part.inline_data.data
-        mime_type = part.inline_data.mime_type or "image/jpeg"
+        # Iterate through all response parts in case the model returns text/thinking parts alongside the image
+        for part in candidate.content.parts:
+            inline = getattr(part, "inline_data", None)
+            if inline and getattr(inline, "data", None):
+                image_bytes = inline.data
+                mime_type = getattr(inline, "mime_type", None) or "image/jpeg"
+                break
+            elif getattr(part, "text", None):
+                text_parts.append(part.text)
+
+        if not image_bytes:
+            finish_reason = getattr(candidate, "finish_reason", "UNKNOWN")
+            details = f" (finish_reason: {finish_reason})"
+            if text_parts:
+                return f"Error: Model returned text instead of image bytes{details}: {' '.join(text_parts)}"
+            return f"Error: Model response did not contain inline image bytes{details}."
 
         filename = f"field_advisory_{uuid.uuid4().hex[:8]}.jpg"
 
