@@ -34,6 +34,7 @@ from app.tools import (
     fetch_live_weather_forecast,
     fetch_soil_conditions,
     generate_field_advisory_image,
+    generate_field_spray_video,
     get_fields,
     log_spray_event,
 )
@@ -133,6 +134,7 @@ root_agent = Agent(
         fetch_live_weather_forecast,
         fetch_soil_conditions,
         generate_field_advisory_image,
+        generate_field_spray_video,
         get_current_time,
         get_fields,
         add_field,
@@ -140,7 +142,6 @@ root_agent = Agent(
     ],
     after_agent_callback=generate_memories_callback,
     after_model_callback=a2ui_callback,
-    code_executor=code_executor,
 )
 
 app = App(

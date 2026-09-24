@@ -88,6 +88,87 @@ def generate_field_advisory_image(
         return f"Error generating or uploading image: {e}"
 
 
+def generate_field_spray_video(
+    prompt: str = "Agricultural field crop spraying tractor operation video demonstration",
+    tool_context: ToolContext = None,
+) -> str:
+    """Generates a short demonstration video for agricultural crop spraying and field operations using Gemini Omni,
+    saves it to session artifacts, and uploads it to the public Cloud Storage bucket.
+
+    Args:
+        prompt: Description of the crop spraying operation or field video to generate.
+        tool_context: ADK context for saving session artifacts.
+
+    Returns:
+        Public HTTPS URL of the uploaded video in Cloud Storage.
+    """
+    try:
+        # Use gemini-omni-flash-preview model in global region
+        client = genai.Client(vertexai=True, project=FIRESTORE_PROJECT, location="global")
+        response = client.interactions.create(
+            model="gemini-omni-flash-preview",
+            input=f"Short video demonstration of crop field spraying operation: {prompt}",
+        )
+
+        video_bytes = None
+        mime_type = "video/mp4"
+
+        # Safely extract video bytes across possible SDK formats
+        # 1. Check output_video attribute/dict from model_dump
+        d = response.model_dump() if hasattr(response, "model_dump") else {}
+        out_video = getattr(response, "output_video", None) or d.get("output_video")
+        if out_video:
+            if isinstance(out_video, dict):
+                b64 = out_video.get("bytes_base64_encoded") or out_video.get("data") or out_video.get("bytes")
+                if b64:
+                    import base64
+                    video_bytes = base64.b64decode(b64) if isinstance(b64, str) else b64
+            else:
+                b64 = getattr(out_video, "bytes_base64_encoded", None) or getattr(out_video, "data", None) or getattr(out_video, "bytes", None)
+                if b64:
+                    import base64
+                    video_bytes = base64.b64decode(b64) if isinstance(b64, str) else b64
+
+        # 2. Check outputs list fallback
+        if not video_bytes:
+            outputs = getattr(response, "outputs", None) or d.get("outputs") or []
+            for output in outputs:
+                if isinstance(output, dict):
+                    b64 = output.get("bytes_base64_encoded") or output.get("data") or output.get("bytes")
+                    if b64:
+                        import base64
+                        video_bytes = base64.b64decode(b64) if isinstance(b64, str) else b64
+                        break
+                else:
+                    b64 = getattr(output, "bytes_base64_encoded", None) or getattr(output, "data", None) or getattr(output, "bytes", None)
+                    if b64:
+                        import base64
+                        video_bytes = base64.b64decode(b64) if isinstance(b64, str) else b64
+                        break
+
+        if not video_bytes:
+            return "Error: No video bytes returned from gemini-omni-flash-preview model."
+
+        filename = f"field_video_{uuid.uuid4().hex[:8]}.mp4"
+
+        # (1) Save with tool_context.save_artifact so it shows up in Playground Artifacts panel
+        if tool_context is not None:
+            artifact_part = types.Part.from_bytes(data=video_bytes, mime_type=mime_type)
+            tool_context.save_artifact(filename=filename, artifact=artifact_part)
+
+        # (2) Upload video bytes to public Cloud Storage bucket
+        storage_client = storage.Client(project=FIRESTORE_PROJECT)
+        bucket = storage_client.bucket(GCS_BUCKET_NAME)
+        blob = bucket.blob(filename)
+        blob.upload_from_string(video_bytes, content_type=mime_type)
+
+        public_url = f"https://storage.googleapis.com/{GCS_BUCKET_NAME}/{filename}"
+        return public_url
+    except Exception as e:
+        return f"Error generating or uploading video: {e}"
+
+
+
 
 def fetch_live_weather_forecast(location: str = "Fresno, CA") -> str:
     """Fetches real live weather data from Open-Meteo and calculates Delta-T spray suitability.
